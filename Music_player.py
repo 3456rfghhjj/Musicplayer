@@ -2,7 +2,6 @@ import os
 import sys
 import threading
 import time
-import tkinter as tk
 from tkinter import filedialog
 import av
 import customtkinter as ctk
@@ -19,13 +18,11 @@ ACCENT_HOVER = "#45A049"
 TEXT_MAIN = "#E8F5E9"
 TEXT_DIM = "#A5D6A7"
 
-# Colors for the small spectrum analyzer on the right
+# Colors for the separated bar analyzer on the right
 SPEC_BG = "#141D17"
-SPEC_GRID = "#1E2D23"
-SPEC_COLOR_LOW = "#4CAF50"     # Green (bottom)
-SPEC_COLOR_MID = "#CDDC39"     # Yellow-green (middle)
-SPEC_COLOR_HIGH = "#FF7043"    # Orange-red (peaks)
-SPEC_PEAK = "#FFFFFF"
+SPEC_COLOR_LOW = "#4CAF50"     # Green
+SPEC_COLOR_MID = "#CDDC39"     # Yellow-green
+SPEC_COLOR_HIGH = "#FF7043"    # Orange-red
 
 SUPPORTED_EXTENSIONS = (
     ".mp3", ".flac", ".m4a", ".wav", ".alac", ".ogg", ".aac", ".wma",
@@ -39,8 +36,8 @@ class AudioPlayer(ctk.CTk):
         super().__init__()
 
         self.title("Audio Player")
-        self.geometry("760x500")
-        self.minsize(540, 380)
+        self.geometry("780x500")
+        self.minsize(560, 380)
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
 
@@ -56,22 +53,29 @@ class AudioPlayer(ctk.CTk):
         self.total_duration = 0.0
         self.slider_dragging = False
         self.audio_thread = None
+        self._track_finished = False
 
-        # Data for the small 12-band color spectrum analyzer on the right
+        # Data for the 12-band separated bar analyzer on the right
         self.num_bars = 12
+        self.fft_size = 4096
+        self.audio_ring = np.zeros(self.fft_size, dtype=np.float32)
         self.spec_target = np.zeros(self.num_bars, dtype=np.float32)
         self.spec_current = np.zeros(self.num_bars, dtype=np.float32)
-        self.spec_peaks = np.zeros(self.num_bars, dtype=np.float32)
         self.spec_lock = threading.Lock()
+        self._fft_window = np.hanning(self.fft_size).astype(np.float32)
+        self.spec_bars = []
 
         self._create_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_resize)
+        self.bind("<space>", lambda _e: self.toggle_play_pause())
+        self.bind("<Right>", lambda _e: self.next_track())
+        self.bind("<Left>", lambda _e: self.previous_track())
 
         if initial_files:
             self.add_to_playlist(initial_files, play_first=True)
 
-        self.after(200, self._update_ui_loop)
+        self.after(150, self._update_ui_loop)
         self.after(33, self._draw_spectrum)
 
     def _create_ui(self):
@@ -86,14 +90,14 @@ class AudioPlayer(ctk.CTk):
         btn_files = ctk.CTkButton(
             top_panel, text="Open Files", fg_color=BG_ITEM,
             hover_color=BG_ITEM_ACTIVE, text_color=TEXT_MAIN,
-            width=120, command=self.select_files
+            width=130, command=self.select_files
         )
         btn_files.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
 
         btn_folder = ctk.CTkButton(
             top_panel, text="Open Folder", fg_color=BG_ITEM,
             hover_color=BG_ITEM_ACTIVE, text_color=TEXT_MAIN,
-            width=130, command=self.select_folder
+            width=140, command=self.select_folder
         )
         btn_folder.grid(row=0, column=1, padx=6, pady=10, sticky="w")
 
@@ -101,7 +105,7 @@ class AudioPlayer(ctk.CTk):
             top_panel, text="Clear", fg_color="transparent",
             border_width=1, border_color=BG_ITEM_ACTIVE,
             hover_color=BG_ITEM, text_color=TEXT_DIM,
-            width=80, command=self.clear_playlist
+            width=85, command=self.clear_playlist
         )
         btn_clear.grid(row=0, column=3, padx=10, pady=10, sticky="e")
 
@@ -114,7 +118,7 @@ class AudioPlayer(ctk.CTk):
             self.info_panel, text="No track loaded",
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color=TEXT_MAIN, anchor="w", justify="left",
-            wraplength=680
+            wraplength=700
         )
         self.lbl_title.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 2))
 
@@ -161,14 +165,14 @@ class AudioPlayer(ctk.CTk):
         buttons_frame.grid(row=0, column=0, padx=10, pady=10, sticky="w")
 
         self.btn_prev = ctk.CTkButton(
-            buttons_frame, text="⏮", width=38, fg_color=BG_ITEM,
+            buttons_frame, text="⏮ Prev", width=82, fg_color=BG_ITEM,
             hover_color=BG_ITEM_ACTIVE, text_color=TEXT_MAIN,
             command=self.previous_track
         )
         self.btn_prev.pack(side="left", padx=3)
 
         self.btn_play = ctk.CTkButton(
-            buttons_frame, text="▶ Play", width=96, fg_color=ACCENT,
+            buttons_frame, text="▶ Play", width=110, fg_color=ACCENT,
             hover_color=ACCENT_HOVER, text_color="#0D1A10",
             font=ctk.CTkFont(weight="bold"),
             command=self.toggle_play_pause
@@ -176,14 +180,14 @@ class AudioPlayer(ctk.CTk):
         self.btn_play.pack(side="left", padx=3)
 
         self.btn_stop = ctk.CTkButton(
-            buttons_frame, text="⏹", width=38, fg_color=BG_ITEM,
+            buttons_frame, text="⏹ Stop", width=70, fg_color=BG_ITEM,
             hover_color=BG_ITEM_ACTIVE, text_color=TEXT_MAIN,
             command=self.stop
         )
         self.btn_stop.pack(side="left", padx=3)
 
         self.btn_next = ctk.CTkButton(
-            buttons_frame, text="⏭", width=38, fg_color=BG_ITEM,
+            buttons_frame, text="Next ⏭", width=82, fg_color=BG_ITEM,
             hover_color=BG_ITEM_ACTIVE, text_color=TEXT_MAIN,
             command=self.next_track
         )
@@ -199,7 +203,7 @@ class AudioPlayer(ctk.CTk):
         lbl_vol.pack(side="left", padx=(0, 4))
 
         self.slider_volume = ctk.CTkSlider(
-            volume_frame, from_=0, to=100, width=95,
+            volume_frame, from_=0, to=100, width=90,
             fg_color=BG_MAIN, progress_color=ACCENT,
             button_color=TEXT_MAIN, button_hover_color=ACCENT_HOVER,
             command=self._on_volume_change
@@ -207,7 +211,7 @@ class AudioPlayer(ctk.CTk):
         self.slider_volume.set(80)
         self.slider_volume.pack(side="left")
 
-        # 4. Main bottom area split into LEFT (Playlist) and RIGHT (small spectrum analyzer)
+        # 4. Main bottom area split into LEFT (Playlist) and RIGHT (Spectrum)
         bottom_container = ctk.CTkFrame(self, fg_color="transparent")
         bottom_container.grid(row=3, column=0, sticky="nsew", padx=14, pady=(6, 14))
         bottom_container.grid_columnconfigure(0, weight=1)
@@ -223,8 +227,8 @@ class AudioPlayer(ctk.CTk):
         self.playlist_frame.grid_columnconfigure(0, weight=1)
         self.playlist_buttons = []
 
-        # RIGHT: Small window for the bar analyzer
-        right_box = ctk.CTkFrame(bottom_container, fg_color=BG_PANEL, corner_radius=8, width=180)
+        # RIGHT: Separated vertical spectrum bars
+        right_box = ctk.CTkFrame(bottom_container, fg_color=BG_PANEL, corner_radius=8, width=210)
         right_box.grid(row=0, column=1, sticky="ns")
         right_box.grid_propagate(False)
         right_box.grid_columnconfigure(0, weight=1)
@@ -237,104 +241,80 @@ class AudioPlayer(ctk.CTk):
         )
         lbl_spec_title.grid(row=0, column=0, pady=(8, 4))
 
-        self.spec_canvas = tk.Canvas(
-            right_box, width=156, bg=SPEC_BG,
-            highlightthickness=1, highlightbackground=BG_ITEM
-        )
-        self.spec_canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        bars_container = ctk.CTkFrame(right_box, fg_color=SPEC_BG, corner_radius=6)
+        bars_container.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        bars_container.grid_rowconfigure(0, weight=1)
+
+        self.spec_bars.clear()
+        for i in range(self.num_bars):
+            bars_container.grid_columnconfigure(i, weight=1)
+            bar = ctk.CTkProgressBar(
+                bars_container,
+                orientation="vertical",
+                width=9,
+                corner_radius=3,
+                fg_color="#1D2B22",
+                progress_color=SPEC_COLOR_LOW
+            )
+            bar.set(0.0)
+            bar.grid(row=0, column=i, sticky="ns", padx=2, pady=8)
+            self.spec_bars.append(bar)
 
     def _compute_spectrum(self, mono_data):
-        n = len(mono_data)
-        if n < 64:
-            return
-        window = np.hanning(n)
-        fft_mag = np.abs(np.fft.rfft(mono_data * window)) / n
-        fft_mag = fft_mag[1:]
-        if len(fft_mag) < self.num_bars:
+        n_in = len(mono_data)
+        if n_in == 0:
             return
 
-        indices = np.geomspace(1, len(fft_mag), self.num_bars + 1, dtype=int)
+        with self.spec_lock:
+            if n_in >= self.fft_size:
+                self.audio_ring[:] = mono_data[-self.fft_size:]
+            else:
+                self.audio_ring[:-n_in] = self.audio_ring[n_in:]
+                self.audio_ring[-n_in:] = mono_data
+            samples = self.audio_ring.copy()
+
+        fft_mag = np.abs(np.fft.rfft(samples * self._fft_window)) / self.fft_size
+        fft_mag = fft_mag[2:]
+
+        indices = np.geomspace(2, len(fft_mag), self.num_bars + 1, dtype=int)
         bands = np.zeros(self.num_bars, dtype=np.float32)
         for i in range(self.num_bars):
-            start = indices[i] - 1
-            end = max(start + 1, indices[i + 1] - 1)
+            start = indices[i]
+            end = max(start + 1, indices[i + 1])
             value = np.mean(fft_mag[start:end])
-            compensation = 1.0 + (i / self.num_bars) * 2.2
-            db = np.log10(1.0 + value * 45.0 * compensation)
+            compensation = 1.0 + (i / self.num_bars) * 2.4
+            db = np.log10(1.0 + value * 60.0 * compensation)
             bands[i] = float(np.clip(db, 0.0, 1.0))
 
         with self.spec_lock:
-            self.spec_target = np.maximum(self.spec_target, bands)
+            self.spec_target = self.spec_target * 0.72 + bands * 0.28
 
     def _draw_spectrum(self):
         try:
-            width = self.spec_canvas.winfo_width()
-            height = self.spec_canvas.winfo_height()
-            if width > 20 and height > 20:
-                self.spec_canvas.delete("all")
+            with self.spec_lock:
+                target = self.spec_target.copy()
+                self.spec_target *= 0.92
 
-                for gy in range(16, height, 16):
-                    self.spec_canvas.create_line(0, gy, width, gy, fill=SPEC_GRID, width=1)
+            if not self.is_playing or self.is_paused:
+                target = np.zeros(self.num_bars, dtype=np.float32)
 
-                with self.spec_lock:
-                    target = self.spec_target.copy()
-                    self.spec_target *= 0.65
+            for i in range(self.num_bars):
+                diff = target[i] - self.spec_current[i]
+                if diff > 0:
+                    self.spec_current[i] += diff * 0.32
+                else:
+                    self.spec_current[i] = max(0.0, self.spec_current[i] + diff * 0.16)
 
-                if not self.is_playing or self.is_paused:
-                    target = np.zeros(self.num_bars, dtype=np.float32)
+                level = float(self.spec_current[i])
+                bar = self.spec_bars[i]
+                bar.set(level)
 
-                for i in range(self.num_bars):
-                    if target[i] > self.spec_current[i]:
-                        self.spec_current[i] = target[i]
-                    else:
-                        self.spec_current[i] = max(0.0, self.spec_current[i] - 0.07)
-
-                    if self.spec_current[i] >= self.spec_peaks[i]:
-                        self.spec_peaks[i] = self.spec_current[i]
-                    else:
-                        self.spec_peaks[i] = max(0.0, self.spec_peaks[i] - 0.025)
-
-                margin = 8
-                available_width = width - 2 * margin
-                gap = 3
-                bar_width = max(4.0, (available_width - (self.num_bars - 1) * gap) / self.num_bars)
-                bottom = height - 6
-                max_bar_height = height - 14
-
-                for i in range(self.num_bars):
-                    x1 = margin + i * (bar_width + gap)
-                    x2 = x1 + bar_width
-                    level = self.spec_current[i]
-
-                    if level > 0.01:
-                        mid_threshold = 0.50
-                        high_threshold = 0.80
-
-                        u_low = min(level, mid_threshold)
-                        y_low = bottom - u_low * max_bar_height
-                        self.spec_canvas.create_rectangle(
-                            x1, y_low, x2, bottom, fill=SPEC_COLOR_LOW, outline=""
-                        )
-
-                        if level > mid_threshold:
-                            u_mid = min(level, high_threshold)
-                            y_mid = bottom - u_mid * max_bar_height
-                            self.spec_canvas.create_rectangle(
-                                x1, y_mid, x2, y_low, fill=SPEC_COLOR_MID, outline=""
-                            )
-
-                        if level > high_threshold:
-                            y_high = bottom - level * max_bar_height
-                            self.spec_canvas.create_rectangle(
-                                x1, y_high, x2, y_mid, fill=SPEC_COLOR_HIGH, outline=""
-                            )
-
-                    peak = self.spec_peaks[i]
-                    if peak > 0.02:
-                        py = bottom - peak * max_bar_height - 3
-                        self.spec_canvas.create_rectangle(
-                            x1, py, x2, py + 2, fill=SPEC_PEAK, outline=""
-                        )
+                if level > 0.80:
+                    bar.configure(progress_color=SPEC_COLOR_HIGH)
+                elif level > 0.50:
+                    bar.configure(progress_color=SPEC_COLOR_MID)
+                else:
+                    bar.configure(progress_color=SPEC_COLOR_LOW)
         except Exception:
             pass
         finally:
@@ -412,6 +392,7 @@ class AudioPlayer(ctk.CTk):
         if not (0 <= index < len(self.playlist)):
             return
         self.stop()
+        self._track_finished = False
         self.current_index = index
         self.is_paused = False
         self.stop_event.clear()
@@ -461,7 +442,7 @@ class AudioPlayer(ctk.CTk):
                 text=f"{base_info}  |  {channels_text}"
             ))
 
-            # Variables to verify Dual Mono (2-channel file with identical L and R signals)
+            # Verify Dual Mono (2-channel file with identical L and R signals)
             dual_mono_check_done = (num_channels != 2)
             checked_blocks = 0
 
@@ -511,11 +492,9 @@ class AudioPlayer(ctk.CTk):
                             # Analyze whether 2-channel audio is actually Dual Mono
                             if not dual_mono_check_done:
                                 signal_level = np.max(np.abs(data))
-                                # Ignore initial silence before music starts
                                 if signal_level > 0.01:
                                     are_equal = np.allclose(data[:, 0], data[:, 1], atol=1e-4)
                                     if not are_equal:
-                                        # Difference between L and R detected -> confirmed Stereo
                                         dual_mono_check_done = True
                                         self.after(0, lambda info=base_info: self.lbl_info.configure(
                                             text=f"{info}  |  Stereo"
@@ -523,7 +502,6 @@ class AudioPlayer(ctk.CTk):
                                     else:
                                         checked_blocks += 1
                                         if checked_blocks >= 15:
-                                            # 15 consecutive audio blocks have identical L and R -> Dual Mono
                                             dual_mono_check_done = True
                                             self.after(0, lambda info=base_info: self.lbl_info.configure(
                                                 text=f"{info}  |  Dual Mono"
@@ -541,7 +519,7 @@ class AudioPlayer(ctk.CTk):
             with self.spec_lock:
                 self.spec_target = np.zeros(self.num_bars, dtype=np.float32)
             if finished_naturally and not self.stop_event.is_set():
-                self.after(100, self.next_track)
+                self._track_finished = True
 
     def toggle_play_pause(self):
         if not self.playlist:
@@ -557,6 +535,7 @@ class AudioPlayer(ctk.CTk):
 
     def stop(self):
         self.stop_event.set()
+        self._track_finished = False
         self.is_paused = False
         if self.audio_thread and self.audio_thread.is_alive():
             self.audio_thread.join(timeout=0.5)
@@ -564,6 +543,7 @@ class AudioPlayer(ctk.CTk):
         self.current_time = 0.0
         with self.spec_lock:
             self.spec_target = np.zeros(self.num_bars, dtype=np.float32)
+            self.audio_ring.fill(0.0)
         self.btn_play.configure(text="▶ Play")
         self.slider_time.set(0)
         self.lbl_current_time.configure(text="00:00")
@@ -604,12 +584,16 @@ class AudioPlayer(ctk.CTk):
         self.slider_dragging = False
 
     def _update_ui_loop(self):
+        if self._track_finished:
+            self._track_finished = False
+            self.next_track()
+
         if self.is_playing and not self.slider_dragging and self.total_duration > 0:
             percentage = min(100.0, (self.current_time / self.total_duration) * 100.0)
             self.slider_time.set(percentage)
             self.lbl_current_time.configure(text=self._format_time(self.current_time))
             self.lbl_total_time.configure(text=self._format_time(self.total_duration))
-        self.after(200, self._update_ui_loop)
+        self.after(150, self._update_ui_loop)
 
     @staticmethod
     def _format_time(seconds):
