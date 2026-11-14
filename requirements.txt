@@ -1,0 +1,4 @@
+customtkinter
+av
+sounddevice
+numpy
