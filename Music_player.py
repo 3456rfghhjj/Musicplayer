@@ -36,7 +36,7 @@ class AudioPlayer(ctk.CTk):
         super().__init__()
 
         self.title("Audio Player")
-        self.geometry("780x500")
+        self.geometry("780x500")  # Pôvodná výška okna zachovaná
         self.minsize(560, 380)
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
@@ -283,17 +283,18 @@ class AudioPlayer(ctk.CTk):
             end = max(start + 1, indices[i + 1])
             value = np.mean(fft_mag[start:end])
             compensation = 1.0 + (i / self.num_bars) * 2.4
-            db = np.log10(1.0 + value * 60.0 * compensation)
+            # Zvýšená citlivosť (130.0 namiesto 60.0), aby stĺpce vybiehali vyššie
+            db = np.log10(1.0 + value * 130.0 * compensation)
             bands[i] = float(np.clip(db, 0.0, 1.0))
 
         with self.spec_lock:
-            self.spec_target = self.spec_target * 0.72 + bands * 0.28
+            self.spec_target = self.spec_target * 0.70 + bands * 0.30
 
     def _draw_spectrum(self):
         try:
             with self.spec_lock:
                 target = self.spec_target.copy()
-                self.spec_target *= 0.92
+                self.spec_target *= 0.90
 
             if not self.is_playing or self.is_paused:
                 target = np.zeros(self.num_bars, dtype=np.float32)
@@ -301,24 +302,25 @@ class AudioPlayer(ctk.CTk):
             for i in range(self.num_bars):
                 diff = target[i] - self.spec_current[i]
                 if diff > 0:
-                    self.spec_current[i] += diff * 0.32
+                    self.spec_current[i] += diff * 0.38
                 else:
-                    self.spec_current[i] = max(0.0, self.spec_current[i] + diff * 0.16)
+                    self.spec_current[i] = max(0.0, self.spec_current[i] + diff * 0.18)
 
                 level = float(self.spec_current[i])
                 bar = self.spec_bars[i]
                 bar.set(level)
 
-                if level > 0.80:
+                if level > 0.75:
                     bar.configure(progress_color=SPEC_COLOR_HIGH)
-                elif level > 0.50:
+                elif level > 0.45:
                     bar.configure(progress_color=SPEC_COLOR_MID)
                 else:
                     bar.configure(progress_color=SPEC_COLOR_LOW)
         except Exception:
             pass
         finally:
-            self.after(33, self._draw_spectrum)
+            if self.winfo_exists():
+                self.after(33, self._draw_spectrum)
 
     def _on_resize(self, event):
         if event.widget == self:
@@ -442,7 +444,6 @@ class AudioPlayer(ctk.CTk):
                 text=f"{base_info}  |  {channels_text}"
             ))
 
-            # Verify Dual Mono (2-channel file with identical L and R signals)
             dual_mono_check_done = (num_channels != 2)
             checked_blocks = 0
 
@@ -450,6 +451,7 @@ class AudioPlayer(ctk.CTk):
             self.current_time = 0.0
 
             with sd.OutputStream(samplerate=sample_rate, channels=2, dtype="float32") as out:
+                demux_iterator = container.demux(stream)
                 while not self.stop_event.is_set():
                     if self.seek_requested_time is not None:
                         target = self.seek_requested_time
@@ -459,14 +461,15 @@ class AudioPlayer(ctk.CTk):
                             container.seek(ts, stream=stream, any_frame=False, backward=True)
                             resampler = av.AudioResampler(format="flt", layout="stereo", rate=sample_rate)
                             self.current_time = target
+                            demux_iterator = container.demux(stream)
 
                     if self.is_paused:
                         time.sleep(0.05)
                         continue
 
                     try:
-                        packet = next(container.demux(stream))
-                    except StopIteration:
+                        packet = next(demux_iterator)
+                    except (StopIteration, Exception):
                         finished_naturally = True
                         break
 
@@ -489,7 +492,6 @@ class AudioPlayer(ctk.CTk):
                                 resampled.to_ndarray().reshape(-1, 2), dtype=np.float32
                             )
 
-                            # Analyze whether 2-channel audio is actually Dual Mono
                             if not dual_mono_check_done:
                                 signal_level = np.max(np.abs(data))
                                 if signal_level > 0.01:
@@ -593,7 +595,8 @@ class AudioPlayer(ctk.CTk):
             self.slider_time.set(percentage)
             self.lbl_current_time.configure(text=self._format_time(self.current_time))
             self.lbl_total_time.configure(text=self._format_time(self.total_duration))
-        self.after(150, self._update_ui_loop)
+        if self.winfo_exists():
+            self.after(150, self._update_ui_loop)
 
     @staticmethod
     def _format_time(seconds):
